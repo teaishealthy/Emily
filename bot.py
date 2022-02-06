@@ -1,196 +1,176 @@
-import praw
-import discord
+import logging
+import os
 import re
-import datetime
-
-from discord.ext import tasks
-from random import randint
+import sys
+import traceback
 from datetime import datetime
+from typing import Any, List, Optional
 
-# REDDIT INITILISATION
+import aiohttp
+import asyncpraw  # type: ignore
+import disnake
+import yaml
+from asyncpraw.models.reddit.submission import Submission  # type: ignore
+from asyncpraw.models.reddit.subreddit import Subreddit  # type: ignore
+from disnake.ext import tasks
+from disnake.ext import commands
+from dotenv import load_dotenv
 
-reddit = praw.Reddit(client_id='CHECK-PRAW-TUTORIALS', \
-                     client_secret='CHECK-PRAW-TUTORIALS', \
-                     password='REDDIT-ACCOUNT-PSWD',
-                     user_agent='CHECK-PRAW-TUTORIALS',
-                     username="REDDIT-ACCOUNT-USRNAME")
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-# which subreddit to scrap
-subreddit = reddit.subreddit("VALORANT")
+with open("./config.yaml", "r", encoding="utf-8") as yamlfile:
+    config = yaml.full_load(yamlfile)
 
-# trigger words for the library-ressources
-trigger_words = {
-    "lore",
-    "backstory",
-    "origin",
-    "narrative",
-    "storyline",
-    "protocol",
-    "kingdom",
-    "plot"
-}
 
-# trigger words for the headcanon
-trigger_words_hdcn = {
-    "agent concept",
-    "agent suggestion",
-    "agent idea",
-    "map concept",
-    "map idea",
-    "character idea",
-    "character concept",
-    "agent name"
-}
+LIBRARY_RESOURCES_TRIGGERS: List[str] = config["library_resources"]["triggers"]
+HEADCANON_TRIGGERS: List[str] = config["headcanon"]["triggers"]
+LIBRARY_RESOURCES: int = config["library_resources"]["id"]
+HEADCANON: int = config["headcanon"]["id"]
+WAIT_TIME_SECONDS: int = config["wait_time_seconds"]
+LIMIT: int = config["limit"]
+REQUEST_LIMIT: int = config["request_limit"]
 
-agent_base = "http://www.shiick.xyz/VALORANT/TX_Character_Thumb_"
 
-timestamp = 0
+class Bot(commands.Bot):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)  # type: ignore
+        self.seen: List[str] = []
+        self.current = 0
 
-agents = [
-    "Breach.png",
-    "Guide.png",
-    "Gumshoe.png",
-    "Hunter.png",
-    "Killjoy.png",
-    "Pandemic.png",
-    "Phoenix.png",
-    "Raze.png",
-    "Rift.png",
-    "Sarge.png",
-    "Stealth.png",
-    "Thorne.png",
-    "Vampire.png",
-    "Wraith.png",
-    "Wushu.png"
-]
+        self.library_channel: Optional[disnake.TextChannel] = None
+        self.headcannon_channel: Optional[disnake.TextChannel] = None
 
-# agent colors, in order
-agent_colors = [0x5e4032, 0x614434, 0x504c4a, 0x7b7169, 0x565135, 0x343135, 0x483730, 0x5e4638, 0x3a2b31, 0x573927, 0x33334c, 0x524844, 0x49343d, 0x363e6b, 0x756d74]
+        self.reddit: Optional[asyncpraw.Reddit] = None
+        self.subreddit: Optional[Subreddit] = None
 
-no_repost = []
-current = 0
+        self.loop.create_task(self.once_ready())
 
-limit = 720
+    async def once_ready(self):
+        await client.wait_until_ready()
 
-req_limit = 50
+        session = aiohttp.ClientSession()
+        self.reddit = asyncpraw.Reddit(
+            client_id=os.environ["client_id"],
+            client_secret=os.environ["client_secret"],
+            password=os.environ["password"],
+            user_agent=os.environ["user_agent"],
+            username=os.environ["reddit_username"],
+            requestor_kwargs={"session": session},
+        )
+        self.subreddit: Optional[Subreddit] = await self.reddit.subreddit("VALORANT")
+        await self.subreddit.load()  # type: ignore
+        self.library_channel = client.get_channel(LIBRARY_RESOURCES)  # type: ignore
+        self.headcannon_channel = client.get_channel(HEADCANON)  # type: ignore
 
-#######################
+        if not self.library_channel or not self.headcannon_channel:
+            logging.fatal("Could not find channel")
+            await client.close()
+            sys.exit(1)
 
-# DISCORD INITILISATION
+        self.check_reddit.start()
+        logging.info(f"Logged in as {client.user}")
 
-client = discord.Client()
-channel_id = 753711214663696485 # library ressource id
-channel_id_hd = 751586338846933105 # headcanon id
-WAIT_TIME_SECONDS = 300
+    async def close(self) -> None:
+        await self.reddit.close()  # type: ignore
+        return await super().close()
 
-#######################
+    @tasks.loop(seconds=WAIT_TIME_SECONDS, reconnect=True)
+    async def check_reddit(self):
+        if self.current == LIMIT:
+            self.seen.clear()
+        self.current += 1
 
-# DISCORD EVENTS
+        try:
+            async for submission in self.subreddit.new(limit=REQUEST_LIMIT):  # type: ignore
+                submission: Submission
+                # for each trigger_words
+                await self.find_submissions(
+                    submission=submission,
+                    triggers=LIBRARY_RESOURCES_TRIGGERS,
+                    is_for_resources=True,
+                    channel=self.library_channel,  # type: ignore
+                )
+                await self.find_submissions(
+                    submission=submission,
+                    triggers=HEADCANON_TRIGGERS,
+                    is_for_resources=True,
+                    channel=self.headcannon_channel,  # type: ignore
+                )
 
-@client.event
-async def on_ready():
-    # initiate values
-    global channel, channelHC
-    # initiate library-ressource
-    channel = client.get_channel(channel_id)
-    # initiate headcanon
-    channelHC = client.get_channel(channel_id_hd)
-    # start coroutine for checking reddit
-    check_reddit.start()
-    # logging the bot name
-    print('We have logged in as {0.user}'.format(client))
-    # change bot presence
-    await client.change_presence(activity=discord.Game(name=" alone in a dark place."), status=discord.Status.online)
+        except Exception as error:
+            formatted = traceback.format_exception(
+                type(error), error, error.__traceback__
+            )
+            sys.stderr.write(f"\33[91m{''.join(formatted)}\033[0m")
+            sys.stderr.flush()
 
-@tasks.loop(seconds=WAIT_TIME_SECONDS)
-async def check_reddit():
-    # initiate values
-    new_timestamp = 0
-    posted = []
-    global current
-    global no_repost
-    # clearing if the bot can clear his memory
-    if (current == limit):
-        # clear memory
-        no_repost.clear()
-    # adding 1 to the current time check
-    current = current + 1
-    global timestamp
-    try:
-        # for each new submissions in the req_limit
-        for submission in subreddit.new(limit=req_limit):
-            # for each trigger_words
-            for word in trigger_words:
-                # if it's not a repost
-                if (submission.created > timestamp and submission.id not in posted and submission.id not in no_repost):
-                    # regex bullshit :clown:
-                    title = re.search("\\b" + word + "\\b", submission.title.lower())
-                    content = re.search("\\b" + word + "\\b", submission.selftext.lower())
-                    conceptT = re.search("\\b" + "agent concept" + "\\b", submission.selftext.lower())
-                    conceptC = re.search("\\b" + "agent concept" + "\\b", submission.title.lower())
-                    concept2T = re.search("\\b" + "agent idea" + "\\b", submission.selftext.lower())
-                    concept2C = re.search("\\b" + "agent idea" + "\\b", submission.title.lower())
-                    concept3T = re.search("\\b" + "agent suggestion" + "\\b", submission.selftext.lower())
-                    concept3C = re.search("\\b" + "agent suggestion" + "\\b", submission.title.lower())
-                    # if it has a trigger word
-                    if(title or content):
-                        # block annoying posts
-                        if (not conceptC and not conceptT and not concept2C and not concept2T and not concept3C and not concept3T):
-                            # add the post to avoid reposts
-                            if (new_timestamp == 0):
-                                new_timestamp = submission.created
-                            posted.append(submission.id)
-                            no_repost.append(submission.id)
+    async def find_submissions(
+        self,
+        *,
+        channel: disnake.TextChannel,
+        submission: Submission,
+        triggers: List[str],
+        is_for_resources: bool = False,
+    ):
+        if submission.id in self.seen:
+            return
 
-                            # send embed to the channel with the correct post
-                            await send_embed(channel, submission)
-        if (new_timestamp > 0):
-            timestamp = new_timestamp
-    except Exception as e:
-        # avoid praw crashes when Reddit is lagging
-        print("Error handled.")
-    try:
-        # for each new submissions in the req_limit
-        for submission in subreddit.new(limit=req_limit):
-            # for each headcanon trigger_words
-            for word in trigger_words_hdcn:
-                # if it's not a repost
-                if (submission.created > timestamp and submission.id not in posted and submission.id not in no_repost):
-                    # regex bullshit :clown:
-                    title = re.search("\\b" + word + "\\b", submission.title.lower())
-                    content = re.search("\\b" + word + "\\b", submission.selftext.lower())
-                    # if it has a trigger word
-                    if(title or content):
-                        # add the post to avoid reposts
-                        if (new_timestamp == 0):
-                            new_timestamp = submission.created
-                        posted.append(submission.id)
-                        no_repost.append(submission.id)
+        for word in triggers:
+            content = f"{submission.title} {submission.selftext}"
 
-                        # send embed to the channel with the correct post
-                        await send_embed(channelHC, submission)
-        if (new_timestamp > 0):
-            timestamp = new_timestamp
-    except Exception as e:
-        # avoid praw crashes when Reddit is lagging
-        print("Error handled.")
+            triggered = re.search(rf"\b{word}\b", content, re.IGNORECASE)
+            invalid = re.search(
+                r"\bagent (concept|idea|suggestion)\b",
+                submission.selftext,
+                re.IGNORECASE,
+            )
 
-async def send_embed(chan, submission):
-    # generate random number for the random agent
-    random = randint(0, 15)
+            if not triggered or invalid and is_for_resources:
+                continue
 
-    # create embed according to the post and according to the agent
-    embed = discord.Embed(color=agent_colors[random])
-    embed.set_author(name="New Reddit Post", url="https://www.reddit.com/r/VALORANT/", icon_url="https://styles.redditmedia.com/t5_2dkvmc/styles/communityIcon_bd2cowmj92b51.png?width=256&s=a72824d1eae9ce77b2de79cc01f50c4cb692377e")
-    embed.set_thumbnail(url=agent_base + agents[random])
-    embed.add_field(name="Title", value=submission.title, inline=False)
-    embed.add_field(name="Author", value=submission.author, inline=False)
-    embed.add_field(name="Link", value=submission.url, inline=False)
-    embed.set_footer(text=datetime.utcfromtimestamp(submission.created).strftime("%m/%d/%Y %H:%M") + " UTC")
+            await self.send_embed(channel, submission)  # type: ignore
+            break
 
-    # send the embed
-    await chan.send(embed=embed)
+        self.seen.append(submission.id)
 
-#######################
+    async def send_embed(self, channel: disnake.TextChannel, submission: Submission):
+        description = (
+            submission.selftext
+            if len(submission.selftext) <= 1024
+            else f"{submission.selftext[:1020]}..."
+        )
+        embed = disnake.Embed(
+            title=submission.title, description=description, url=submission.url
+        )
 
-client.run("INSERT-BOT-TOKEN")
+        await submission.author.load()
+        await submission.author.subreddit.load()
+
+        if submission.author.subreddit.over18:
+            embed.set_author(
+                name=submission.author,
+                icon_url=self.subreddit.icon_img,  # type: ignore
+            )
+        else:
+            embed.set_author(
+                name=submission.author,
+                url=f"https://reddit.com/u/{submission.author}",
+                icon_url=submission.author.icon_img,
+            )
+        embed.timestamp = datetime.utcfromtimestamp(submission.created)
+
+        await channel.send(embed=embed)
+
+
+client = Bot(
+    commands.when_mentioned,
+    activity=disnake.Game(name=" alone in a dark place."),
+    status=disnake.Status.dnd,
+)
+
+
+if __name__ == "__main__":
+    client.remove_command("help")
+    client.load_extension("jishaku")
+    client.run(os.environ["token"])

@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "emily"
+version = "1.0.0"
+description = ""
+authors = ["teaishealthy <teaishealthy@protonmail.com>"]
+license = "GNU General Public License v3.0"
+
+[tool.poetry.dependencies]
+python = "^3.8"
+disnake = "^2.3.1"
+disnake-jishaku = "^2.6.5"
+PyYAML = "^6.0"
+python-dotenv = "^0.19.2"
+asyncpraw = "^7.5.0"
+
+[tool.poetry.dev-dependencies]
+black = {version = "^22.1.0", allow-prereleases = true}
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

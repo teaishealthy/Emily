@@ -1,0 +1,27 @@
+wait_time_seconds: 10
+limit: 720
+request_limit: 50
+
+library_resources:
+  id: <fill in>
+  triggers:
+  - lore
+  - backstory
+  - origin
+  - narrative
+  - storyline
+  - protocol
+  - kingdom
+  - plot
+
+headcanon:
+  id: <fill in>
+  triggers:
+  - agent concept
+  - agent suggestion
+  - agent idea
+  - agent name
+  - map concept
+  - map idea
+  - character idea
+  - character concept
